@@ -1,0 +1,12 @@
+output_dir : "./output"
+
+URL : "http://localhost:8000"
+
+llm_config:
+  model_id : "google/gemma-3-4b-it"
+  language : "korean"
+  device : "cuda"
+  sys_prompt : "You are a professional translator. Accurately translate the provided text and output only the result without any explanations in"
+  user_prompt : "Translation this sentence"
+  temperature : 0.3
+  

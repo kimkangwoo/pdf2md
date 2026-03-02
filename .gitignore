@@ -1,0 +1,7 @@
+.pyc
+
+src/__pycache__
+__pycache__
+output
+samples
+test.ipynb
