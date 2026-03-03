@@ -81,6 +81,9 @@ conda env create -f requirements.yaml
 conda activate pdf2md
 
 uv pip install vLLM gradio
+
+# huggingface token 입력
+huggingface-cli login
 ```
 
 ### 실행
