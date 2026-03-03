@@ -79,6 +79,8 @@ llm_config:
 # conda 환경 복원
 conda env create -f requirements.yaml
 conda activate pdf2md
+
+uv pip install vLLM gradio
 ```
 
 ### 실행
