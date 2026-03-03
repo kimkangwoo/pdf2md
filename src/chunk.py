@@ -62,14 +62,16 @@ class MarkdownChunkTranslator:
     _RE_REFERENCES  = re.compile(r'^#{0,4}\s*references?\s*$', re.IGNORECASE)
     # 표 구분선 (|---|---|)
     _RE_TABLE_SEP   = re.compile(r'^\|?\s*[-:]+[\s|:-]*$')
+    # 표 데이터 행 (| cell | cell |) – 파이프로 시작하거나 끝나는 줄
+    _RE_TABLE_ROW   = re.compile(r'^\|.*\|\s*$')
 
     def _classify_lines(self, text: str) -> List[Dict]:
         """
         텍스트를 줄 단위로 분석하여 세그먼트 목록을 반환합니다.
         각 세그먼트는 {"text": str, "translate": bool} 형식입니다.
 
-        번역 제외: 헤더, 단독 이미지, 블록 수식, 코드 블록, References 이후 줄
-        번역 포함: 일반 문장, 이미지 캡션(순수 이미지가 아닌 줄), 표 셀 내 텍스트
+        번역 제외: 헤더, 단독 이미지, 블록 수식, 코드 블록, 표 전체(구분선·데이터 행), References 이후 줄
+        번역 포함: 일반 문장, 이미지 캡션(순수 이미지가 아닌 줄)
         """
         lines = text.split('\n')
         segments: List[Dict] = []
@@ -99,12 +101,17 @@ class MarkdownChunkTranslator:
                 _flush(protected_buf, False); protected_buf = []
             translate_buf.append(line)
 
+        in_table = False
         for line in lines:
             stripped = line.strip()
+
+            # 표 관련 줄인지 확인
+            is_table_line = bool(self._RE_TABLE_SEP.match(stripped) or self._RE_TABLE_ROW.match(stripped))
 
             # 1) 코드 블록 토글
             if self._RE_CODE_FENCE.match(stripped):
                 in_code_block = not in_code_block
+                in_table = False
                 _push_protected(line)
                 continue
             if in_code_block:
@@ -114,6 +121,7 @@ class MarkdownChunkTranslator:
             # 2) 블록 수식 토글
             if stripped == '$$':
                 in_math_block = not in_math_block
+                in_table = False
                 _push_protected(line)
                 continue
             if in_math_block:
@@ -123,6 +131,7 @@ class MarkdownChunkTranslator:
             # 3) References 섹션 진입 (이후 모두 번역 제외)
             if self._RE_REFERENCES.match(stripped):
                 in_references = True
+                in_table = False
                 _push_protected(line)
                 continue
             if in_references:
@@ -131,31 +140,41 @@ class MarkdownChunkTranslator:
 
             # 4) 헤더 – 번역 제외
             if self._RE_HEADER.match(stripped):
+                in_table = False
                 _push_protected(line)
                 continue
 
             # 5) 단독 이미지 – 번역 제외 (캡션 없음)
             if self._RE_IMAGE_ONLY.match(stripped):
+                in_table = False
                 _push_protected(line)
                 continue
 
             # 6) 인라인 수식 (`$...$`) 이 포함된 줄은 번역 포함
-            #    (줄 전체가 $$가 아닌 경우)
             if self._RE_MATH_BLOCK.match(stripped):
+                in_table = False
                 _push_protected(line)
                 continue
 
-            # 7) 표 구분선 – 번역 제외
-            if self._RE_TABLE_SEP.match(stripped):
+            # 7) 표 처리 (시작 부분에 개행 추가)
+            if is_table_line:
+                if not in_table:
+                    # 표의 시작점: 앞선 텍스트와 붙지 않도록 개행 추가
+                    line = "\n\n" + line
+                in_table = True
                 _push_protected(line)
                 continue
+            if in_table:
+                # 표의 끝점: 뒷선 텍스트와 붙지 않도록 개행 추가
+                line = "\n" + line
+                in_table = False
 
             # 8) HTML 태그 단독 줄 – 번역 제외
             if self._RE_HTML_TAG.match(stripped):
                 _push_protected(line)
                 continue
 
-            # 9) 나머지(일반 텍스트, 이미지 캡션, 표 셀, 인라인 수식 포함 줄) – 번역 포함
+            # 9) 나머지(일반 텍스트, 이미지 캡션, 인라인 수식 포함 줄) – 번역 포함
             _push_translate(line)
 
         # 남은 버퍼 처리
@@ -205,31 +224,42 @@ class MarkdownChunkTranslator:
         return final
 
     async def _translate_chunk(self, text: str, max_retries: int = 5, base_wait: float = 5.0) -> str:
-        """번역 요청. Connection 에러 발생 시 최대 max_retries 회까지 재시도합니다."""
+        """번역 요청. Connection 에러 발생 시 최대 max_retries 회까지 재시도합니다.
+        단일 청크 전체 시간이 300초(5분)를 초과하면 원문을 유지하고 다음으로 진행합니다.
+        """
         if not text.strip():
             return text
 
-        for attempt in range(1, max_retries + 1):
-            try:
-                response = await self.client.chat.completions.create(
-                    model=self.model_id,
-                    messages=[
-                        {"role": "system", "content": self.system_prompt},
-                        {"role": "user", "content": f"{self.user_prompt} : {text}"}
-                    ],
-                    temperature=self.temperature,
-                    stream=False
-                )
-                return response.choices[0].message.content
+        async def _do_request() -> str:
+            for attempt in range(1, max_retries + 1):
+                try:
+                    response = await self.client.chat.completions.create(
+                        model=self.model_id,
+                        messages=[
+                            {"role": "system", "content": self.system_prompt},
+                            {"role": "user", "content": f"{self.user_prompt} : {text}"}
+                        ],
+                        temperature=self.temperature,
+                        stream=False
+                    )
+                    return response.choices[0].message.content
 
-            except Exception as e:
-                if attempt < max_retries:
-                    wait_time = base_wait * attempt  # 5s → 10s → 15s → 20s
-                    print(f"[재시도 {attempt}/{max_retries}] 연결 오류 발생. {wait_time:.0f}초 후 재시도... ({e})")
-                    await asyncio.sleep(wait_time)
-                else:
-                    print(f"[최대 재시도 초과] 원문을 유지합니다. ({e})")
-                    return text  # 모든 재시도 실패 시 원문 유지
+                except Exception as e:
+                    if attempt < max_retries:
+                        wait_time = base_wait * attempt
+                        print(f"[재시도 {attempt}/{max_retries}] 연결 오류 발생. {wait_time:.0f}초 후 재시도... ({e})")
+                        await asyncio.sleep(wait_time)
+                    else:
+                        print(f"[최대 재시도 초과] 원문을 유지합니다. ({e})")
+                        return text
+            return text  # fallback
+
+        try:
+            return await asyncio.wait_for(_do_request(), timeout=300)  # 5분 제한
+        except asyncio.TimeoutError:
+            preview = text[:60].replace('\n', ' ')
+            print(f"[타임아웃] 5분 초과 – 원문을 유지하고 다음 청크로 진행합니다. 청크 미리보기: {preview!r}")
+            return text
 
     async def process_and_save(self, save_path: str):
         if not self.tokenizer:

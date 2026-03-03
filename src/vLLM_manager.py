@@ -46,6 +46,7 @@ class VLLMManager:
             "--port", str(port),
             "--trust-remote-code",
             "--dtype", "auto",
+            "--gpu-memory-utilization", str(llm_config.get("gpu_memory_utilization", 0.9)),
         ]
         
         if extra_args:
