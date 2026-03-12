@@ -24,6 +24,10 @@ APP_PORT    = int(CONFIG.get("app_port", 7860))
 HEALTH_URL  = f"{SERVER_URL}/health"
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+GRADIO_TMP_DIR = os.path.join(OUTPUT_DIR, "gradio_tmp")
+os.makedirs(GRADIO_TMP_DIR, exist_ok=True)
+os.environ["GRADIO_TEMP_DIR"] = GRADIO_TMP_DIR
+
 
 # 번역 작업 큐 (순차 처리)
 _job_queue: queue.Queue = queue.Queue()
